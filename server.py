@@ -1,25 +1,30 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import sqlite3
 import time
 import secrets
 
+# =========================
+# 🚀 APP CONFIG
+# =========================
 app = Flask(__name__)
+CORS(app)
 
-DB = "licenses.db"
+DB_NAME = "licenses.db"
 
 # =========================
-# 🧱 INIT DATABASE
+# 🧱 DATABASE INIT
 # =========================
 def init_db():
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
 
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS licenses (
-        key TEXT PRIMARY KEY,
-        hwid TEXT,
-        expires INTEGER
-    )
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS licenses (
+            license_key TEXT PRIMARY KEY,
+            hwid TEXT,
+            expires INTEGER
+        )
     """)
 
     conn.commit()
@@ -28,9 +33,9 @@ def init_db():
 init_db()
 
 # =========================
-# 🔑 GENERATE LICENSE
+# 🔑 GENERATE LICENSE KEY
 # =========================
-def generate_key():
+def generate_license_key():
     return "LIC-" + secrets.token_hex(8).upper()
 
 # =========================
@@ -41,93 +46,112 @@ def create_license():
 
     data = request.json or {}
 
-    days = data.get("days", 30)
+    days = int(data.get("days", 30))
 
-    key = generate_key()
+    license_key = generate_license_key()
 
     expires = int(time.time()) + (days * 86400)
 
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
 
-    c.execute(
-        "INSERT INTO licenses VALUES (?, ?, ?)",
-        (key, None, expires)
+    cursor.execute(
+        """
+        INSERT INTO licenses
+        (license_key, hwid, expires)
+        VALUES (?, ?, ?)
+        """,
+        (license_key, None, expires)
     )
 
     conn.commit()
     conn.close()
 
     return jsonify({
-        "license": key,
-        "expires": expires
+        "success": True,
+        "license": license_key,
+        "expires": expires,
+        "days": days
     })
 
 # =========================
 # 🔐 CHECK LICENSE + HWID
 # =========================
 @app.route("/check", methods=["POST"])
-def check():
+def check_license():
 
     data = request.json or {}
 
-    key = data.get("license")
+    license_key = data.get("license")
     hwid = data.get("hwid")
 
-    # sécurité
-    if not key or not hwid:
+    # ❌ données manquantes
+    if not license_key or not hwid:
         return jsonify({
+            "success": False,
             "status": "missing_data"
         }), 400
 
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
 
-    c.execute(
-        "SELECT hwid, expires FROM licenses WHERE key=?",
-        (key,)
+    cursor.execute(
+        """
+        SELECT hwid, expires
+        FROM licenses
+        WHERE license_key = ?
+        """,
+        (license_key,)
     )
 
-    row = c.fetchone()
+    result = cursor.fetchone()
 
-    # ❌ licence inconnue
-    if not row:
+    # ❌ licence invalide
+    if not result:
         conn.close()
 
         return jsonify({
-            "status": "invalid"
+            "success": False,
+            "status": "invalid_license"
         }), 403
 
-    stored_hwid, expires = row
+    stored_hwid, expires = result
 
     # ❌ licence expirée
     if int(time.time()) > expires:
         conn.close()
 
         return jsonify({
-            "status": "expired"
+            "success": False,
+            "status": "license_expired"
         }), 403
 
     # ✅ première activation
     if stored_hwid is None:
 
-        c.execute(
-            "UPDATE licenses SET hwid=? WHERE key=?",
-            (hwid, key)
+        cursor.execute(
+            """
+            UPDATE licenses
+            SET hwid = ?
+            WHERE license_key = ?
+            """,
+            (hwid, license_key)
         )
 
         conn.commit()
         conn.close()
 
         return jsonify({
-            "status": "valid"
+            "success": True,
+            "status": "activated"
         })
 
-    # ❌ autre PC
+    # ❌ mauvais HWID
     if stored_hwid != hwid:
         conn.close()
 
         return jsonify({
+            "success": False,
             "status": "hwid_mismatch"
         }), 403
 
@@ -135,14 +159,16 @@ def check():
     conn.close()
 
     return jsonify({
+        "success": True,
         "status": "valid"
     })
 
 # =========================
-# ❤️ TEST SERVER
+# ❤️ HOME ROUTE
 # =========================
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
+
     return jsonify({
         "server": "TuneSoft License Server",
         "status": "online"
@@ -152,4 +178,9 @@ def home():
 # 🚀 START SERVER
 # =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=False
+    )
